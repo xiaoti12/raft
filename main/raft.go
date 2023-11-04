@@ -57,7 +57,7 @@ const (
 const (
 	LeaderHeartBeatTimeout time.Duration = 100 * time.Millisecond
 	HeartBeatTimeoutBase   time.Duration = 300 * time.Millisecond
-	HeartBeatTimeRand      int64         = 200
+	HeartBeatTimeRand      int64         = 200 // * time.Millisecond
 )
 
 // A Go object implementing a single Raft peer.
@@ -78,6 +78,7 @@ type Raft struct {
 
 	role      Role
 	heartbeat chan int
+	stopElect chan int
 }
 
 // return currentTerm and whether this server
@@ -147,11 +148,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.curTerm >= args.CandidateTerm {
-		DPrintf("[%v] TERM-<%v> receive vote request from [%v] TERM-<%v>, refuse", rf.curTerm, rf.me, args.CandidateID, args.CandidateTerm)
+		DPrintf("[%v] TERM-<%v> receive vote request from [%v] TERM-<%v>, refuse", rf.me, rf.curTerm, args.CandidateID, args.CandidateTerm)
 		reply.ReplyTerm = rf.curTerm
 		reply.VoteGranted = false
 	} else {
-		DPrintf("[%v] TERM-<%v> receive vote request from [%v] TERM-<%v>, agree, change term", rf.curTerm, rf.me, args.CandidateID, args.CandidateTerm)
+		DPrintf("[%v] TERM-<%v> receive vote request from [%v] TERM-<%v>, agree, change term", rf.me, rf.curTerm, args.CandidateID, args.CandidateTerm)
 
 		rf.heartbeat <- args.CandidateID
 
@@ -203,6 +204,7 @@ func (rf *Raft) StartElection() {
 	badVoteCh := make(chan int)
 
 	rf.mu.Lock()
+	rf.role = CANDIDATE
 	rf.curTerm++
 	rf.voteFor = rf.me
 	voteCount++
@@ -225,6 +227,11 @@ func (rf *Raft) StartElection() {
 			select {
 			case from := <-rf.heartbeat:
 				DPrintf("[%v] receive heartbeat from [%v], quit election", rf.me, from)
+				close(electResCh)
+				return
+
+			case term := <-rf.stopElect:
+				DPrintf("[%v] TERM-<%v> quit election", rf.me, term)
 				close(electResCh)
 				return
 
@@ -271,12 +278,10 @@ func (rf *Raft) getVote(server int, term int, badResponse chan int) bool {
 	args := &RequestVoteArgs{}
 	reply := &RequestVoteReply{}
 
-	rf.mu.Lock()
-	args.CandidateID = term
-	args.CandidateTerm = rf.curTerm
-	rf.mu.Unlock()
+	args.CandidateID = rf.me
+	args.CandidateTerm = term
 
-	DPrintf("[%v] TERM-<%v> send vote request to [%v]", rf.me, server, term)
+	DPrintf("[%v] TERM-<%v> send vote request to [%v]", rf.me, term, server)
 	ok := rf.sendRequestVote(server, args, reply)
 	if !ok {
 		return false
@@ -309,11 +314,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	rf.heartbeat <- args.LeaderID
-	if rf.role != FOLLOWER {
-		rf.role = FOLLOWER
-	}
 	if args.Term > rf.curTerm {
 		rf.curTerm = args.Term
+	} else if args.Term < rf.curTerm {
+		reply.ReplyTerm = rf.curTerm
+		reply.Success = false
+		return
+	}
+	//只有heartbeat的term大于等于自己才会检查follower状态
+	if rf.role != FOLLOWER {
+		DPrintf("%v [%v] change itself to follower", rf.role, rf.me)
+		rf.role = FOLLOWER
 	}
 	reply.ReplyTerm = rf.curTerm
 	reply.Success = true
@@ -321,6 +332,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 func (rf *Raft) sendHeartBeat() {
 	for !rf.killed() {
 		rf.mu.Lock()
+		term := rf.curTerm
 		if rf.role != LEADER {
 			DPrintf("%v [%v] attempts to send heartbeat", rf.role, rf.me)
 			rf.mu.Unlock()
@@ -328,29 +340,29 @@ func (rf *Raft) sendHeartBeat() {
 		}
 		rf.mu.Unlock()
 
+		//通过通道给自己发送心跳包
+		rf.heartbeat <- rf.me
 		for i := 0; i < len(rf.peers); i++ {
 			if i == rf.me {
 				continue
 			}
-			go rf.prepareHeartBeat(i)
+			go rf.prepareHeartBeat(i, term)
 		}
 
-		DPrintf("[%v] send heartbeat to all follwers", rf.me)
+		DPrintf("[%v] TERM-<%v> send heartbeat to all follwers", rf.me, term)
 		time.Sleep(LeaderHeartBeatTimeout)
 	}
 }
-func (rf *Raft) prepareHeartBeat(server int) {
+func (rf *Raft) prepareHeartBeat(server int, term int) {
 	args := &AppendEntriesArgs{}
 	reply := &AppendEntriesReply{}
 
-	rf.mu.Lock()
 	args.LeaderID = rf.me
-	args.Term = rf.curTerm
-	rf.mu.Unlock()
+	args.Term = term
 
 	ok := rf.sendAppendEntries(server, args, reply)
 	if !ok {
-		DPrintf("[%v] receive bad heartbeat response from [%v]", rf.me, server)
+		DPrintf("[%v] TERM-<%v> receive bad heartbeat response from [%v]", rf.me, term, server)
 	}
 
 }
@@ -368,11 +380,11 @@ func (rf *Raft) waitingHeartBeat() {
 		case <-time.After(getRandTimeout()):
 			rf.mu.Lock()
 			if rf.role == FOLLOWER {
-				DPrintf("[%v] heartbeat timeout, start election", rf.me)
+				DPrintf("[%v] TERM-<%v> heartbeat timeout, start election", rf.me, rf.curTerm)
 				go rf.StartElection()
 			} else if rf.role == CANDIDATE {
-				DPrintf("[%v] election timeout, restart", rf.me)
-				rf.heartbeat <- rf.me
+				DPrintf("[%v] TERM-<%v> election timeout, restart", rf.me, rf.curTerm)
+				rf.stopElect <- rf.curTerm
 				go rf.StartElection()
 			}
 			rf.mu.Unlock()
@@ -438,6 +450,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.voteFor = -1
 	rf.role = FOLLOWER
 	rf.heartbeat = make(chan int)
+	rf.stopElect = make(chan int)
 	rf.curTerm = 1
 
 	go rf.waitingHeartBeat()
