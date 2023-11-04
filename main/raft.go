@@ -153,6 +153,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	} else {
 		DPrintf("[%v] TERM-<%v> receive vote request from [%v] TERM-<%v>, agree, change term", rf.curTerm, rf.me, args.CandidateID, args.CandidateTerm)
 
+		rf.heartbeat <- args.CandidateID
+
 		reply.ReplyTerm = rf.curTerm
 		reply.VoteGranted = true
 
@@ -197,7 +199,8 @@ func (rf *Raft) StartElection() {
 	voteCount := 0
 	replyCount := 0
 	voteResCh := make(chan bool)
-	selectResCh := make(chan bool)
+	electResCh := make(chan bool)
+	badVoteCh := make(chan int)
 
 	rf.mu.Lock()
 	rf.curTerm++
@@ -211,7 +214,7 @@ func (rf *Raft) StartElection() {
 			continue
 		}
 		go func(server int) {
-			getVote := rf.getVote(server, term)
+			getVote := rf.getVote(server, term, badVoteCh)
 			voteResCh <- getVote
 		}(i)
 	}
@@ -219,40 +222,52 @@ func (rf *Raft) StartElection() {
 	//waiting for each vote result
 	go func() {
 		for {
-			res := <-voteResCh
+			select {
+			case from := <-rf.heartbeat:
+				DPrintf("[%v] receive heartbeat from [%v], quit election", rf.me, from)
+				close(electResCh)
+				return
 
-			replyCount++
-			if res {
-				voteCount++
-			}
-			rf.mu.Lock()
-			if rf.role != CANDIDATE {
-				selectResCh <- false
+			case voteRes := <-voteResCh:
+				replyCount++
+				if voteRes {
+					voteCount++
+				}
+				rf.mu.Lock()
+				if rf.role != CANDIDATE {
+					DPrintf("[%v] loses candidate role, quit election", rf.me)
+					close(electResCh)
+					rf.mu.Unlock()
+					return
+				}
 				rf.mu.Unlock()
-				return
-			}
-			if voteCount >= len(rf.peers)/2+1 {
-				selectResCh <- true
-				return
-			} else if replyCount >= len(rf.peers) {
-				selectResCh <- false
-				return
+
+				if voteCount >= len(rf.peers)/2+1 {
+					electResCh <- true
+					return
+				} else if replyCount >= len(rf.peers) {
+					electResCh <- false
+					return
+				}
 			}
 		}
 	}()
 
-	result := <-selectResCh
+	result, ok := <-electResCh
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if result {
-		rf.role = LEADER
-		go rf.sendHeartBeat()
-	} else {
-		rf.role = FOLLOWER
+	if ok && result {
+		if rf.role == CANDIDATE {
+			DPrintf("[%v] win election in TERM-<%v>", rf.me, rf.curTerm)
+			rf.role = LEADER
+			go rf.sendHeartBeat()
+		} else {
+			DPrintf("[%v] win election in TERM-<%v> but role is wrong", rf.me, rf.curTerm)
+		}
 	}
 
 }
-func (rf *Raft) getVote(server int, term int) bool {
+func (rf *Raft) getVote(server int, term int, badResponse chan int) bool {
 	args := &RequestVoteArgs{}
 	reply := &RequestVoteReply{}
 
@@ -261,7 +276,7 @@ func (rf *Raft) getVote(server int, term int) bool {
 	args.CandidateTerm = rf.curTerm
 	rf.mu.Unlock()
 
-	DPrintf("[%v] TERM-<%v> send vote request to [%v] in ", rf.me, server, term)
+	DPrintf("[%v] TERM-<%v> send vote request to [%v]", rf.me, server, term)
 	ok := rf.sendRequestVote(server, args, reply)
 	if !ok {
 		return false
@@ -269,6 +284,7 @@ func (rf *Raft) getVote(server int, term int) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if reply.ReplyTerm > rf.curTerm {
+		DPrintf("[%v] TERM-<%v> receive higher term from [%v]", rf.me, rf.curTerm, server)
 		rf.role = FOLLOWER
 		rf.curTerm = reply.ReplyTerm
 		return false
@@ -293,9 +309,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	rf.heartbeat <- args.LeaderID
+	if rf.role != FOLLOWER {
+		rf.role = FOLLOWER
+	}
 	if args.Term > rf.curTerm {
 		rf.curTerm = args.Term
-		rf.role = FOLLOWER
 	}
 	reply.ReplyTerm = rf.curTerm
 	reply.Success = true
@@ -342,23 +360,30 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
-func (rf *Raft) waitingLeader() {
+func (rf *Raft) waitingHeartBeat() {
 	for !rf.killed() {
-		timeout := HeartBeatTimeoutBase +
-			time.Duration(rand.Int63n(HeartBeatTimeRand))*time.Millisecond
-		timer := time.NewTimer(timeout)
 		select {
 		case <-rf.heartbeat:
-			timer.Stop()
-		case <-timer.C:
+
+		case <-time.After(getRandTimeout()):
 			rf.mu.Lock()
 			if rf.role == FOLLOWER {
 				DPrintf("[%v] heartbeat timeout, start election", rf.me)
+				go rf.StartElection()
+			} else if rf.role == CANDIDATE {
+				DPrintf("[%v] election timeout, restart", rf.me)
+				rf.heartbeat <- rf.me
 				go rf.StartElection()
 			}
 			rf.mu.Unlock()
 		}
 	}
+}
+
+func getRandTimeout() time.Duration {
+	timeout := HeartBeatTimeoutBase +
+		time.Duration(rand.Int63n(HeartBeatTimeRand))*time.Millisecond
+	return timeout
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -383,15 +408,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, isLeader
 }
 
-// the tester doesn't halt goroutines created by Raft after each test,
-// but it does call the Kill() method. your code can use killed() to
-// check whether Kill() has been called. the use of atomic avoids the
-// need for a lock.
-//
-// the issue is that long-running goroutines use memory and may chew
-// up CPU time, perhaps causing later tests to fail and generating
-// confusing debug output. any goroutine with a long-running loop
-// should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
@@ -422,8 +438,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.voteFor = -1
 	rf.role = FOLLOWER
 	rf.heartbeat = make(chan int)
+	rf.curTerm = 1
 
-	go rf.waitingLeader()
+	go rf.waitingHeartBeat()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
