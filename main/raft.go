@@ -68,15 +68,20 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
-	// Your data here (2A, 2B, 2C).
-	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
-
-	curTerm int
+	//持久性状态
+	curTerm int // start by 0
 	voteFor int
-	logs    []*LogEntry
+	logs    []LogEntry // index start by 1
+
+	//易失性状态
+	commitIndex int // start by 0, 0 => no log has been committed
+	lastApplied int // start by 0
+
+	nextIndex  []int
+	matchIndex []int // each index start by 0
 
 	role      Role
+	leaderID  int
 	heartbeat chan int
 	stopElect chan int
 }
@@ -134,6 +139,9 @@ type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
 	CandidateTerm int
 	CandidateID   int
+
+	lastLogIndex int
+	lastLogTerm  int
 }
 
 type RequestVoteReply struct {
@@ -146,20 +154,32 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	mylastIndex := len(rf.logs)
+	mylastTerm := 0
+	if mylastIndex > 0 {
+		mylastTerm = rf.logs[mylastIndex].Term
+	}
+
+	reply.ReplyTerm = rf.curTerm
 	if rf.curTerm >= args.CandidateTerm {
-		DPrintf("[%v] TERM-<%v> receive vote request from [%v] TERM-<%v>, refuse", rf.me, rf.curTerm, args.CandidateID, args.CandidateTerm)
-		reply.ReplyTerm = rf.curTerm
+		DPrintf("[%v] TERM-<%v> receive vote request from [%v] TERM-<%v>, refuse: candidate term is not higher", rf.me, rf.curTerm, args.CandidateID, args.CandidateTerm)
+		reply.VoteGranted = false
+	} else if mylastTerm > args.lastLogTerm {
+		DPrintf("[%v] receive vote request from [%v], refuse: candidate lastLogTerm #%v < #%v", rf.me, args.CandidateID, args.lastLogTerm, mylastTerm)
+		reply.VoteGranted = false
+	} else if mylastTerm == args.lastLogTerm && mylastIndex > args.lastLogIndex {
+		DPrintf("[%v] receive vote request from [%v], refuse: candidate lastLogTerm #%v < #%v", rf.me, args.CandidateID, args.lastLogIndex, mylastIndex)
 		reply.VoteGranted = false
 	} else {
 		DPrintf("[%v] TERM-<%v> receive vote request from [%v] TERM-<%v>, agree, change term", rf.me, rf.curTerm, args.CandidateID, args.CandidateTerm)
 
 		rf.heartbeat <- args.CandidateID
-
-		reply.ReplyTerm = rf.curTerm
 		reply.VoteGranted = true
 
 		rf.voteFor = args.CandidateID
 		rf.curTerm = args.CandidateTerm
+		rf.leaderID = args.CandidateID
 	}
 }
 
@@ -175,11 +195,18 @@ func (rf *Raft) StartElection() {
 	electResCh := make(chan bool)
 
 	rf.mu.Lock()
+	// update to candidate role
 	rf.role = CANDIDATE
 	rf.curTerm++
 	rf.voteFor = rf.me
 	voteCount++
+	//prepare args
 	term := rf.curTerm
+	lastIndex := len(rf.logs)
+	lastTerm := 0
+	if lastIndex > 0 {
+		lastTerm = rf.logs[lastIndex].Term
+	}
 	rf.mu.Unlock()
 
 	for i := 0; i < len(rf.peers); i++ {
@@ -187,7 +214,7 @@ func (rf *Raft) StartElection() {
 			continue
 		}
 		go func(server int) {
-			getVote := rf.getVote(server, term)
+			getVote := rf.sendRequestVote(server, term, lastIndex, lastTerm)
 			voteResCh <- getVote
 		}(i)
 	}
@@ -246,12 +273,14 @@ func (rf *Raft) StartElection() {
 	}
 
 }
-func (rf *Raft) getVote(server int, term int) bool {
+func (rf *Raft) sendRequestVote(server, term, lastIndex, lastTerm int) bool {
 	args := &RequestVoteArgs{}
 	reply := &RequestVoteReply{}
 
 	args.CandidateID = rf.me
 	args.CandidateTerm = term
+	args.lastLogIndex = lastIndex
+	args.lastLogTerm = lastTerm
 
 	DPrintf("[%v] TERM-<%v> send vote request to [%v]", rf.me, term, server)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
@@ -274,7 +303,7 @@ type AppendEntriesArgs struct {
 	LeaderID     int
 	PrevLogIndex int
 	PrevLogTerm  int
-	Entries      []*LogEntry
+	Entries      []LogEntry
 	LeaderCommit int
 }
 type AppendEntriesReply struct {
@@ -305,7 +334,6 @@ func (rf *Raft) sendHeartBeat() {
 
 	for !rf.killed() {
 		rf.mu.Lock()
-		term := rf.curTerm
 		if rf.role != LEADER {
 			DPrintf("%v [%v] attempts to send heartbeat", rf.role, rf.me)
 			rf.mu.Unlock()
@@ -319,35 +347,43 @@ func (rf *Raft) sendHeartBeat() {
 			if i == rf.me {
 				continue
 			}
-			go rf.prepareHeartBeat(i, term)
+			go rf.sendAppendEntries(i)
 		}
 
 		// DPrintf("[%v] TERM-<%v> send heartbeat to all follwers", rf.me, term)
 		time.Sleep(LeaderHeartBeatTimeout)
 	}
 }
-func (rf *Raft) prepareHeartBeat(server int, term int) {
+func (rf *Raft) sendAppendEntries(server int) {
 	args := &AppendEntriesArgs{}
 	reply := &AppendEntriesReply{}
 
+	rf.mu.Lock()
 	args.LeaderID = rf.me
-	args.Term = term
+	args.Term = rf.curTerm
 
-	ok := rf.sendAppendEntries(server, args, reply)
+	nextIndex := rf.nextIndex[server]
+	args.PrevLogIndex = nextIndex - 1
+	args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
+	args.Entries = []LogEntry{rf.logs[nextIndex]}
+	args.LeaderCommit = rf.commitIndex
+	rf.mu.Unlock()
+
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	if !ok {
 		// DPrintf("[%v] TERM-<%v> receive bad heartbeat response from [%v]", rf.me, term, server)
 		// do something
 	} else if !reply.Success {
-		DPrintf("[%v] TERM-<%v> receive failed response from [%v]", rf.me, term, server)
+		DPrintf("[%v] TERM-<%v> receive failed response from [%v]", rf.me, args.Term, server)
 		//do something with reply
 	}
 
 }
 
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	return ok
-}
+// func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+// 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+// 	return ok
+// }
 
 func (rf *Raft) waitingHeartBeat() {
 	for !rf.killed() {
@@ -393,6 +429,21 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	if rf.killed() {
+		return index, term, isLeader
+	}
+	rf.mu.Lock()
+	index = len(rf.logs) + 1
+	term = rf.curTerm
+	isLeader = rf.role == LEADER
+	if isLeader {
+		newLog := LogEntry{
+			Command: command,
+			Term:    term,
+		}
+		rf.logs = append(rf.logs, newLog)
+	}
+	rf.mu.Unlock()
 
 	return index, term, isLeader
 }
@@ -424,11 +475,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.curTerm = 0
 	rf.voteFor = -1
+
 	rf.role = FOLLOWER
 	rf.heartbeat = make(chan int)
 	rf.stopElect = make(chan int)
-	rf.curTerm = 1
 
 	go rf.waitingHeartBeat()
 
