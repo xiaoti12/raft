@@ -14,7 +14,7 @@ func (rf *Raft) StartElection() {
 	voteCount++
 	//prepare args
 	term := rf.curTerm
-	lastIndex := len(rf.logs)
+	lastIndex := len(rf.logs) - 1
 	lastTerm := 0
 	if lastIndex > 0 {
 		lastTerm = rf.logs[lastIndex].Term
@@ -75,9 +75,11 @@ func (rf *Raft) StartElection() {
 	defer rf.mu.Unlock()
 	if ok && result {
 		if rf.role == CANDIDATE {
-			DPrintf("[%v] win election in TERM-<%v>", rf.me, rf.curTerm)
+			LeaderPrintf("[%v] win election in TERM-<%v>", rf.me, rf.curTerm)
 			rf.role = LEADER
-			DPrintf("[%v] TERM-<%v> starts to send heartbeats", rf.me, rf.curTerm)
+			// CANNOT init here cause func requires mutex which leads to deadlock (see 5 lines above)
+			// rf.initFollowerIndex()
+			LeaderPrintf("[%v] TERM-<%v> starts to send heartbeats", rf.me, rf.curTerm)
 			go rf.sendHeartBeat()
 		} else {
 			DPrintf("[%v] win election in TERM-<%v> but role is wrong", rf.me, rf.curTerm)
@@ -91,8 +93,8 @@ func (rf *Raft) sendRequestVote(server, term, lastIndex, lastTerm int) bool {
 
 	args.CandidateID = rf.me
 	args.CandidateTerm = term
-	args.lastLogIndex = lastIndex
-	args.lastLogTerm = lastTerm
+	args.LastLogIndex = lastIndex
+	args.LastLogTerm = lastTerm
 
 	DPrintf("[%v] TERM-<%v> send vote request to [%v]", rf.me, term, server)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
@@ -101,10 +103,10 @@ func (rf *Raft) sendRequestVote(server, term, lastIndex, lastTerm int) bool {
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if reply.ReplyTerm > rf.curTerm {
+	if reply.VoteTerm > rf.curTerm {
 		DPrintf("[%v] TERM-<%v> receive higher term from [%v]", rf.me, rf.curTerm, server)
 		rf.role = FOLLOWER
-		rf.curTerm = reply.ReplyTerm
+		rf.curTerm = reply.VoteTerm
 		return false
 	}
 	return reply.VoteGranted

@@ -1,11 +1,15 @@
 package raft
 
-import "time"
+import (
+	"time"
+)
 
 func (rf *Raft) sendHeartBeat() {
-
+	rf.initFollowerIndex()
 	for !rf.killed() {
 		rf.mu.Lock()
+		// term := rf.curTerm
+		// logSize := len(rf.logs)
 		if rf.role != LEADER {
 			DPrintf("%v [%v] attempts to send heartbeat", rf.role, rf.me)
 			rf.mu.Unlock()
@@ -22,8 +26,18 @@ func (rf *Raft) sendHeartBeat() {
 			go rf.sendAppendEntries(i)
 		}
 
-		// DPrintf("[%v] TERM-<%v> send heartbeat to all follwers", rf.me, term)
+		// DPrintf("[%v] TERM-<%v> send heartbeat to all follwers,logs Size: %v", rf.me, term, logSize)
 		time.Sleep(LeaderHeartBeatTimeout)
+	}
+}
+func (rf *Raft) initFollowerIndex() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	logSize := len(rf.logs)
+	for i := range rf.nextIndex {
+		//last log index + 1
+		rf.nextIndex[i] = logSize
 	}
 }
 
@@ -37,17 +51,59 @@ func (rf *Raft) sendAppendEntries(server int) {
 
 	nextIndex := rf.nextIndex[server]
 	args.PrevLogIndex = nextIndex - 1
-	args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
-	args.Entries = []LogEntry{rf.logs[nextIndex]}
+	if nextIndex < len(rf.logs) {
+		args.Entries = []LogEntry{rf.logs[nextIndex]}
+		LeaderPrintf("[%v] TERM-<%v> prepare to send log#%v to [%v]", rf.me, rf.curTerm, nextIndex, server)
+	}
+	if args.PrevLogIndex >= 0 {
+		args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
+	}
 	args.LeaderCommit = rf.commitIndex
 	rf.mu.Unlock()
 
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	if !ok {
-		// DPrintf("[%v] TERM-<%v> receive bad heartbeat response from [%v]", rf.me, term, server)
-		// do something
-	} else if !reply.Success {
-		DPrintf("[%v] TERM-<%v> receive failed response from [%v]", rf.me, args.Term, server)
-		//do something with reply
+	if !ok || len(args.Entries) == 0 {
+		return
+	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	//process with reply
+	if reply.Success {
+		rf.logCommitCount[nextIndex]++
+		if rf.logCommitCount[nextIndex] >= len(rf.peers)/2+1 {
+			// LeaderPrintf("[%v] TERM-<%v> commits log#%v", rf.me, args.Term, nextIndex)
+			rf.matchIndex[server] = nextIndex
+			rf.nextIndex[server] = rf.matchIndex[server] + 1
+			rf.updateCommit(server)
+		}
+	} else {
+		if reply.FollowerTerm > rf.curTerm {
+			LeaderPrintf("[%v] TERM-<%v> receive [%v] TERM-<%v> heartbeat response", rf.me, rf.curTerm, server, reply.FollowerTerm)
+			rf.curTerm = reply.FollowerTerm
+			rf.role = FOLLOWER
+		} else {
+			LeaderPrintf("[%v] TERM-<%v> receive failed heartbeat response from [%v]", rf.me, args.Term, server)
+			rf.nextIndex[server]--
+		}
+	}
+}
+func (rf *Raft) updateCommit(server int) {
+	// dont need to require mutex lock
+	N := rf.matchIndex[server]
+	if N <= rf.commitIndex {
+		return
+	}
+	// exclude leader self
+	majority := len(rf.peers) / 2
+	count := 0
+	for _, m := range rf.matchIndex {
+		if m >= N {
+			count++
+		}
+	}
+	// N come from nextIndex, which is keeped within logSize
+	if count >= majority && rf.logs[N].Term == rf.curTerm {
+		rf.commitIndex = N
+		LeaderPrintf("[%v] TERM-<%v> commits to log#%v", rf.me, rf.curTerm, N)
 	}
 }

@@ -55,6 +55,7 @@ const (
 	LEADER    Role = "leader"
 )
 const (
+	StateApplyInterval     time.Duration = 200 * time.Millisecond
 	LeaderHeartBeatTimeout time.Duration = 100 * time.Millisecond
 	HeartBeatTimeoutBase   time.Duration = 300 * time.Millisecond
 	HeartBeatTimeRand      int64         = 200 // * time.Millisecond
@@ -80,10 +81,14 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int // each index start by 0
 
-	role      Role
-	leaderID  int
-	heartbeat chan int
-	stopElect chan int
+	role           Role
+	leaderID       int
+	heartbeat      chan int
+	stopElect      chan int
+	logCommitCount map[int]int
+
+	//for test
+	applyCh chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -140,13 +145,13 @@ type RequestVoteArgs struct {
 	CandidateTerm int
 	CandidateID   int
 
-	lastLogIndex int
-	lastLogTerm  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 type RequestVoteReply struct {
 	// Your data here (2A).
-	ReplyTerm   int
+	VoteTerm    int
 	VoteGranted bool
 }
 
@@ -155,21 +160,21 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	mylastIndex := len(rf.logs)
+	mylastIndex := len(rf.logs) - 1
 	mylastTerm := 0
 	if mylastIndex > 0 {
 		mylastTerm = rf.logs[mylastIndex].Term
 	}
 
-	reply.ReplyTerm = rf.curTerm
+	reply.VoteTerm = rf.curTerm
 	if rf.curTerm >= args.CandidateTerm {
 		DPrintf("[%v] TERM-<%v> receive vote request from [%v] TERM-<%v>, refuse: candidate term is not higher", rf.me, rf.curTerm, args.CandidateID, args.CandidateTerm)
 		reply.VoteGranted = false
-	} else if mylastTerm > args.lastLogTerm {
-		DPrintf("[%v] receive vote request from [%v], refuse: candidate lastLogTerm #%v < #%v", rf.me, args.CandidateID, args.lastLogTerm, mylastTerm)
+	} else if mylastTerm > args.LastLogTerm {
+		DPrintf("[%v] receive vote request from [%v], refuse: candidate lastLogTerm #%v < #%v", rf.me, args.CandidateID, args.LastLogTerm, mylastTerm)
 		reply.VoteGranted = false
-	} else if mylastTerm == args.lastLogTerm && mylastIndex > args.lastLogIndex {
-		DPrintf("[%v] receive vote request from [%v], refuse: candidate lastLogTerm #%v < #%v", rf.me, args.CandidateID, args.lastLogIndex, mylastIndex)
+	} else if mylastTerm == args.LastLogTerm && mylastIndex > args.LastLogIndex {
+		DPrintf("[%v] receive vote request from [%v], refuse: candidate lastLogIndex #%v < #%v", rf.me, args.CandidateID, args.LastLogIndex, mylastIndex)
 		reply.VoteGranted = false
 	} else {
 		DPrintf("[%v] TERM-<%v> receive vote request from [%v] TERM-<%v>, agree, change term", rf.me, rf.curTerm, args.CandidateID, args.CandidateTerm)
@@ -192,27 +197,42 @@ type AppendEntriesArgs struct {
 	LeaderCommit int
 }
 type AppendEntriesReply struct {
-	ReplyTerm int
-	Success   bool
+	FollowerTerm int
+	Success      bool
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.heartbeat <- args.LeaderID
-	if args.Term > rf.curTerm {
-		rf.curTerm = args.Term
-	} else if args.Term < rf.curTerm {
-		reply.ReplyTerm = rf.curTerm
+
+	if args.Term < rf.curTerm || args.PrevLogIndex > len(rf.logs) {
+		reply.FollowerTerm = rf.curTerm
 		reply.Success = false
 		return
 	}
+	if args.Term > rf.curTerm {
+		rf.curTerm = args.Term
+	}
+	//reset timer
+	rf.heartbeat <- args.LeaderID
 	//只有heartbeat的term大于等于自己才会检查follower状态
 	if rf.role != FOLLOWER {
 		DPrintf("%v [%v] change itself to follower", rf.role, rf.me)
 		rf.role = FOLLOWER
 	}
-	reply.ReplyTerm = rf.curTerm
+	if args.PrevLogIndex >= 0 && rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
+		rf.logs = rf.logs[:args.PrevLogIndex]
+	}
+	if args.LeaderCommit > rf.commitIndex {
+		DPrintf("[%v] TERM-<%v> update commit to log#%v", rf.me, rf.curTerm, args.LeaderCommit)
+	}
+	rf.commitIndex = args.LeaderCommit
+	rf.logs = append(rf.logs, args.Entries...)
+	if len(args.Entries) > 0 {
+		DPrintf("[%v] TERM-<%v> receive log#%v", rf.me, rf.curTerm, len(rf.logs)-1)
+	}
+
+	reply.FollowerTerm = rf.curTerm
 	reply.Success = true
 }
 
@@ -233,6 +253,28 @@ func (rf *Raft) waitingHeartBeat() {
 			}
 			rf.mu.Unlock()
 		}
+	}
+}
+
+func (rf *Raft) applyLogLoop() {
+	for !rf.killed() {
+		rf.mu.Lock()
+		start := rf.lastApplied + 1
+		end := rf.commitIndex
+		if start <= end {
+			for i := start; i <= end; i++ {
+				msg := ApplyMsg{
+					CommandValid: true,
+					Command:      rf.logs[i].Command,
+					CommandIndex: i,
+				}
+				rf.applyCh <- msg
+			}
+			rf.lastApplied = rf.commitIndex
+			DPrintf("[%v] apply to log %v", rf.me, rf.lastApplied)
+		}
+		rf.mu.Unlock()
+		time.Sleep(StateApplyInterval)
 	}
 }
 
@@ -264,7 +306,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return index, term, isLeader
 	}
 	rf.mu.Lock()
-	index = len(rf.logs) + 1
+	index = len(rf.logs)
 	term = rf.curTerm
 	isLeader = rf.role == LEADER
 	if isLeader {
@@ -272,7 +314,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Command: command,
 			Term:    term,
 		}
+		DPrintf("[%v] TERM-<%v> put and send log in index #%v", rf.me, term, index)
 		rf.logs = append(rf.logs, newLog)
+		rf.logCommitCount[index]++
 	}
 	rf.mu.Unlock()
 
@@ -308,12 +352,20 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.curTerm = 0
 	rf.voteFor = -1
+	rf.logs = []LogEntry{LogEntry{}}
+
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
 
 	rf.role = FOLLOWER
 	rf.heartbeat = make(chan int)
 	rf.stopElect = make(chan int)
+	rf.logCommitCount = make(map[int]int)
+
+	rf.applyCh = applyCh
 
 	go rf.waitingHeartBeat()
+	go rf.applyLogLoop()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

@@ -29,12 +29,14 @@ func TestInitialElection2A(t *testing.T) {
 	cfg.begin("Test (2A): initial election")
 
 	// is a leader elected?
+	TestPrintf("check leader")
 	cfg.checkOneLeader()
 
 	// sleep a bit to avoid racing with followers learning of the
 	// election, then check that all peers agree on the term.
 	time.Sleep(50 * time.Millisecond)
 	term1 := cfg.checkTerms()
+	TestPrintf("term is %v now", term1)
 	if term1 < 1 {
 		t.Fatalf("term is %v, but should be at least 1", term1)
 	}
@@ -60,41 +62,41 @@ func TestReElection2A(t *testing.T) {
 	cfg.begin("Test (2A): election after network down")
 
 	leader1 := cfg.checkOneLeader()
-	DPrintf("TEST: leader is [%v]", leader1)
+	TestPrintf("TEST: leader is [%v]", leader1)
 
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
-	DPrintf("TEST: leader [%v] is detached from net", leader1)
+	TestPrintf("TEST: leader [%v] is detached from net", leader1)
 	cfg.checkOneLeader()
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader.
 	cfg.connect(leader1)
-	DPrintf("TEST: previous leader [%v] is connected to net", leader1)
+	TestPrintf("TEST: previous leader [%v] is connected to net", leader1)
 	leader2 := cfg.checkOneLeader()
-	DPrintf("TEST: but leader is [%v] now", leader2)
+	TestPrintf("TEST: but leader is [%v] now", leader2)
 
 	// if there's no quorum, no leader should
 	// be elected.
 	cfg.disconnect(leader2)
-	DPrintf("TEST: leader [%v] is detached from net", leader2)
+	TestPrintf("TEST: leader [%v] is detached from net", leader2)
 	cfg.disconnect((leader2 + 1) % servers)
-	DPrintf("TEST: follower [%v] is detached from net", (leader2+1)%servers)
+	TestPrintf("TEST: follower [%v] is detached from net", (leader2+1)%servers)
 	time.Sleep(2 * RaftElectionTimeout)
 	cfg.checkNoLeader()
-	DPrintf("TEST: no leader now")
+	TestPrintf("TEST: no leader now")
 
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
-	DPrintf("TEST: follower [%v] is connected to net", (leader2+1)%servers)
+	TestPrintf("TEST: follower [%v] is connected to net", (leader2+1)%servers)
 	leader3 := cfg.checkOneLeader()
-	DPrintf("TEST: leader is [%v]", leader3)
+	TestPrintf("TEST: leader is [%v]", leader3)
 
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
-	DPrintf("TEST: previous leader [%v] is connected to net", leader2)
+	TestPrintf("TEST: previous leader [%v] is connected to net", leader2)
 	leader4 := cfg.checkOneLeader()
-	DPrintf("TEST: but leader is [%v] now", leader4)
+	TestPrintf("TEST: but leader is [%v] now", leader4)
 
 	cfg.end()
 }
@@ -112,7 +114,7 @@ func TestBasicAgree2B(t *testing.T) {
 		if nd > 0 {
 			t.Fatalf("some have committed before Start()")
 		}
-
+		TestPrintf("send command, supposed to be put in log %v", index)
 		xindex := cfg.one(index*100, servers, false)
 		if xindex != index {
 			t.Fatalf("got index %v but expected %v", xindex, index)
