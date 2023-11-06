@@ -142,7 +142,6 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
-// example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
@@ -164,44 +163,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 }
 
-// example code to send a RequestVote RPC to a server.
-// server is the index of the target server in rf.peers[].
-// expects RPC arguments in args.
-// fills in *reply with RPC reply, so caller should
-// pass &reply.
-// the types of the args and reply passed to Call() must be
-// the same as the types of the arguments declared in the
-// handler function (including whether they are pointers).
-//
-// The labrpc package simulates a lossy network, in which servers
-// may be unreachable, and in which requests and replies may be lost.
-// Call() sends a request and waits for a reply. If a reply arrives
-// within a timeout interval, Call() returns true; otherwise
-// Call() returns false. Thus Call() may not return for a while.
-// A false return can be caused by a dead server, a live server that
-// can't be reached, a lost request, or a lost reply.
-//
-// Call() is guaranteed to return (perhaps after a delay) *except* if the
-// handler function on the server side does not return.  Thus there
-// is no need to implement your own timeouts around Call().
-//
-// look at the comments in ../labrpc/labrpc.go for more details.
-//
-// if you're having trouble getting RPC to work, check that you've
-// capitalized all field names in structs passed over RPC, and
-// that the caller passes the address of the reply struct with &, not
-// the struct itself.
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
-}
+// func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+// 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+// 	return ok
+// }
 
 func (rf *Raft) StartElection() {
 	voteCount := 0
 	replyCount := 0
 	voteResCh := make(chan bool)
 	electResCh := make(chan bool)
-	badVoteCh := make(chan int)
 
 	rf.mu.Lock()
 	rf.role = CANDIDATE
@@ -216,7 +187,7 @@ func (rf *Raft) StartElection() {
 			continue
 		}
 		go func(server int) {
-			getVote := rf.getVote(server, term, badVoteCh)
+			getVote := rf.getVote(server, term)
 			voteResCh <- getVote
 		}(i)
 	}
@@ -267,6 +238,7 @@ func (rf *Raft) StartElection() {
 		if rf.role == CANDIDATE {
 			DPrintf("[%v] win election in TERM-<%v>", rf.me, rf.curTerm)
 			rf.role = LEADER
+			DPrintf("[%v] TERM-<%v> starts to send heartbeats", rf.me, rf.curTerm)
 			go rf.sendHeartBeat()
 		} else {
 			DPrintf("[%v] win election in TERM-<%v> but role is wrong", rf.me, rf.curTerm)
@@ -274,7 +246,7 @@ func (rf *Raft) StartElection() {
 	}
 
 }
-func (rf *Raft) getVote(server int, term int, badResponse chan int) bool {
+func (rf *Raft) getVote(server int, term int) bool {
 	args := &RequestVoteArgs{}
 	reply := &RequestVoteReply{}
 
@@ -282,7 +254,7 @@ func (rf *Raft) getVote(server int, term int, badResponse chan int) bool {
 	args.CandidateTerm = term
 
 	DPrintf("[%v] TERM-<%v> send vote request to [%v]", rf.me, term, server)
-	ok := rf.sendRequestVote(server, args, reply)
+	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	if !ok {
 		return false
 	}
@@ -330,6 +302,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Success = true
 }
 func (rf *Raft) sendHeartBeat() {
+
 	for !rf.killed() {
 		rf.mu.Lock()
 		term := rf.curTerm
@@ -349,7 +322,7 @@ func (rf *Raft) sendHeartBeat() {
 			go rf.prepareHeartBeat(i, term)
 		}
 
-		DPrintf("[%v] TERM-<%v> send heartbeat to all follwers", rf.me, term)
+		// DPrintf("[%v] TERM-<%v> send heartbeat to all follwers", rf.me, term)
 		time.Sleep(LeaderHeartBeatTimeout)
 	}
 }
@@ -362,7 +335,11 @@ func (rf *Raft) prepareHeartBeat(server int, term int) {
 
 	ok := rf.sendAppendEntries(server, args, reply)
 	if !ok {
-		DPrintf("[%v] TERM-<%v> receive bad heartbeat response from [%v]", rf.me, term, server)
+		// DPrintf("[%v] TERM-<%v> receive bad heartbeat response from [%v]", rf.me, term, server)
+		// do something
+	} else if !reply.Success {
+		DPrintf("[%v] TERM-<%v> receive failed response from [%v]", rf.me, term, server)
+		//do something with reply
 	}
 
 }
