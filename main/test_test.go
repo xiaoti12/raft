@@ -57,7 +57,7 @@ func TestReElection2A(t *testing.T) {
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
 
-	cfg.begin("Test (2A): election after network failure")
+	cfg.begin("Test (2A): election after network down")
 
 	leader1 := cfg.checkOneLeader()
 	DPrintf("TEST: leader is [%v]", leader1)
