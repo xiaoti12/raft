@@ -58,7 +58,7 @@ const (
 	StateApplyInterval     time.Duration = 200 * time.Millisecond
 	LeaderHeartBeatTimeout time.Duration = 100 * time.Millisecond
 	HeartBeatTimeoutBase   time.Duration = 300 * time.Millisecond
-	HeartBeatTimeRand      int64         = 200 // * time.Millisecond
+	HeartBeatTimeRand      int64         = 300 // * time.Millisecond
 )
 
 // A Go object implementing a single Raft peer.
@@ -166,8 +166,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	reply.VoteTerm = rf.curTerm
-	if rf.curTerm >= args.CandidateTerm {
-		DPrintf("[%v] TERM-<%v> receive vote request from [%v] TERM-<%v>, refuse: candidate term is not higher", rf.me, rf.curTerm, args.CandidateID, args.CandidateTerm)
+	if rf.curTerm > args.CandidateTerm {
+		DPrintf("[%v] TERM-<%v> receive vote request from [%v] TERM-<%v>, refuse: candidate term is lower", rf.me, rf.curTerm, args.CandidateID, args.CandidateTerm)
 		reply.VoteGranted = false
 	} else if mylastTerm > args.LastLogTerm {
 		DPrintf("[%v] receive vote request from [%v], refuse: candidate lastLogTerm #%v < #%v", rf.me, args.CandidateID, args.LastLogTerm, mylastTerm)
@@ -176,7 +176,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		DPrintf("[%v] receive vote request from [%v], refuse: candidate lastLogIndex #%v < #%v", rf.me, args.CandidateID, args.LastLogIndex, mylastIndex)
 		reply.VoteGranted = false
 	} else {
-		DPrintf("[%v] TERM-<%v> receive vote request from [%v] TERM-<%v>, agree, change term", rf.me, rf.curTerm, args.CandidateID, args.CandidateTerm)
+		ElectPrintf("[%v] TERM-<%v> receive vote request from [%v] TERM-<%v>, agree, change term", rf.me, rf.curTerm, args.CandidateID, args.CandidateTerm)
 
 		rf.heartbeat <- args.CandidateID
 		reply.VoteGranted = true
@@ -205,7 +205,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 
 	if args.Term < rf.curTerm {
-		DPrintf("[%v] TERM-<%v> receive lower term heartbeat from %v TERM-<%v>", rf.me, rf.curTerm, args.LeaderID, args.Term)
+		DPrintf("[%v] TERM-<%v> receive lower term heartbeat from [%v] TERM-<%v>", rf.me, rf.curTerm, args.LeaderID, args.Term)
 		reply.FollowerTerm = rf.curTerm
 		reply.Success = false
 		return
@@ -213,6 +213,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term > rf.curTerm {
 		rf.curTerm = args.Term
 	}
+	reply.FollowerTerm = rf.curTerm
 	//reset timer
 	rf.heartbeat <- args.LeaderID
 	//只有heartbeat的term大于等于自己才会检查follower状态
@@ -221,12 +222,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.role = FOLLOWER
 	}
 	if args.PrevLogIndex > rf.getLastLogIndex() {
-		reply.FollowerTerm = rf.curTerm
 		reply.Success = false
 		return
 	}
+	//delele term unmatched log
 	if args.PrevLogIndex >= 0 && rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
 		rf.logs = rf.logs[:args.PrevLogIndex]
+		//need to return now
+		reply.Success = false
+		return
+	}
+	// if log#PrevLogIndex+1... exist and is not commited, delete them
+	if args.PrevLogIndex < rf.getLastLogIndex() && rf.commitIndex < args.PrevLogIndex+1 {
+		rf.logs = rf.logs[:args.PrevLogIndex+1]
 	}
 	if len(args.Entries) > 0 {
 		DPrintf("[%v] TERM-<%v> receive log#%v", rf.me, rf.curTerm, rf.getLastLogIndex()+1)
@@ -238,7 +246,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.commitIndex = newCommit
 
-	reply.FollowerTerm = rf.curTerm
 	reply.Success = true
 }
 
@@ -253,7 +260,7 @@ func (rf *Raft) waitingHeartBeat() {
 				DPrintf("[%v] TERM-<%v> heartbeat timeout, start election", rf.me, rf.curTerm)
 				go rf.StartElection()
 			} else if rf.role == CANDIDATE {
-				BadPrintf("[%v] TERM-<%v> election timeout, restart", rf.me, rf.curTerm)
+				ElectPrintf("[%v] TERM-<%v> election timeout, restart", rf.me, rf.curTerm)
 				rf.stopElect <- rf.curTerm
 				go rf.StartElection()
 			}

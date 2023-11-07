@@ -53,7 +53,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 	args.PrevLogIndex = nextIndex - 1
 	if nextIndex <= rf.getLastLogIndex() {
 		args.Entries = []LogEntry{rf.logs[nextIndex]}
-		LeaderPrintf("[%v] TERM-<%v> prepare to send log#%v %v to [%v]", rf.me, rf.curTerm, nextIndex, args.Entries, server)
+		// LeaderPrintf("[%v] TERM-<%v> prepare to send log#%v %v to [%v]", rf.me, rf.curTerm, nextIndex, args.Entries, server)
 	}
 	if args.PrevLogIndex >= 0 {
 		args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
@@ -64,7 +64,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	if !ok || len(args.Entries) == 0 {
 		if !ok {
-			LeaderPrintf("[%v] TERM-<%v> fail to receive heartbeat back from [%v]: log#%v %v", rf.me, args.Term, server, nextIndex, args.Entries)
+			// LeaderPrintf("[%v] TERM-<%v> fail to receive heartbeat back from [%v]: log#%v %v", rf.me, args.Term, server, nextIndex, args.Entries)
 		}
 		return
 	}
@@ -75,11 +75,13 @@ func (rf *Raft) sendAppendEntries(server int) {
 		// LeaderPrintf("[%v] TERM-<%v> commits log#%v", rf.me, args.Term, nextIndex)
 		rf.matchIndex[server] = nextIndex
 		rf.nextIndex[server] = rf.matchIndex[server] + 1
-		LeaderPrintf("[%v] TERM-<%v> increase [%v] nextIndex to #%v", rf.me, args.Term, server, rf.nextIndex[server])
+		// LeaderPrintf("[%v] TERM-<%v> increase [%v] nextIndex to #%v", rf.me, args.Term, server, rf.nextIndex[server])
 		rf.updateCommit(server)
 
 	} else {
-		if reply.FollowerTerm > rf.curTerm {
+		//不应该用rf.curTerm，因为如果有若干个节点offline又online
+		//第一个heartbeat response会更改leader的curTerm，从而影响后续response的判断
+		if reply.FollowerTerm > args.Term {
 			BadPrintf("[%v] TERM-<%v> receive [%v] TERM-<%v> heartbeat response,change to follower", rf.me, rf.curTerm, server, reply.FollowerTerm)
 			rf.curTerm = reply.FollowerTerm
 			rf.role = FOLLOWER
