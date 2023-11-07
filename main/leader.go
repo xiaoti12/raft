@@ -11,7 +11,7 @@ func (rf *Raft) sendHeartBeat() {
 		// term := rf.curTerm
 		// logSize := len(rf.logs)
 		if rf.role != LEADER {
-			DPrintf("%v [%v] attempts to send heartbeat", rf.role, rf.me)
+			BadPrintf("%v [%v] attempts to send heartbeat", rf.role, rf.me)
 			rf.mu.Unlock()
 			return
 		}
@@ -53,7 +53,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 	args.PrevLogIndex = nextIndex - 1
 	if nextIndex < len(rf.logs) {
 		args.Entries = []LogEntry{rf.logs[nextIndex]}
-		LeaderPrintf("[%v] TERM-<%v> prepare to send log#%v to [%v]", rf.me, rf.curTerm, nextIndex, server)
+		// LeaderPrintf("[%v] TERM-<%v> prepare to send log#%v %v to [%v]", rf.me, rf.curTerm, nextIndex, args.Entries, server)
 	}
 	if args.PrevLogIndex >= 0 {
 		args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
@@ -74,15 +74,16 @@ func (rf *Raft) sendAppendEntries(server int) {
 			// LeaderPrintf("[%v] TERM-<%v> commits log#%v", rf.me, args.Term, nextIndex)
 			rf.matchIndex[server] = nextIndex
 			rf.nextIndex[server] = rf.matchIndex[server] + 1
+			// LeaderPrintf("[%v] TERM-<%v> increase [%v] nextIndex to #%v", rf.me, args.Term, server, rf.nextIndex[server])
 			rf.updateCommit(server)
 		}
 	} else {
 		if reply.FollowerTerm > rf.curTerm {
-			LeaderPrintf("[%v] TERM-<%v> receive [%v] TERM-<%v> heartbeat response", rf.me, rf.curTerm, server, reply.FollowerTerm)
+			BadPrintf("[%v] TERM-<%v> receive [%v] TERM-<%v> heartbeat response,change to follower", rf.me, rf.curTerm, server, reply.FollowerTerm)
 			rf.curTerm = reply.FollowerTerm
 			rf.role = FOLLOWER
 		} else {
-			LeaderPrintf("[%v] TERM-<%v> receive failed heartbeat response from [%v]", rf.me, args.Term, server)
+			LeaderPrintf("[%v] TERM-<%v> decrease [%v] nextIndex to #%v", rf.me, args.Term, server, nextIndex-1)
 			rf.nextIndex[server]--
 		}
 	}

@@ -205,7 +205,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if args.Term < rf.curTerm || args.PrevLogIndex > len(rf.logs) {
+	if args.Term < rf.curTerm {
+		DPrintf("[%v] TERM-<%v> receive lower term heartbeat from %v TERM-<%v>", rf.me, rf.curTerm, args.LeaderID, args.Term)
 		reply.FollowerTerm = rf.curTerm
 		reply.Success = false
 		return
@@ -217,8 +218,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.heartbeat <- args.LeaderID
 	//只有heartbeat的term大于等于自己才会检查follower状态
 	if rf.role != FOLLOWER {
-		DPrintf("%v [%v] change itself to follower", rf.role, rf.me)
+		BadPrintf("%v [%v] receive heartbeat, change itself to follower", rf.role, rf.me)
 		rf.role = FOLLOWER
+	}
+	//last log index is length-1
+	if args.PrevLogIndex >= len(rf.logs) {
+		reply.FollowerTerm = rf.curTerm
+		reply.Success = false
+		return
 	}
 	if args.PrevLogIndex >= 0 && rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
 		rf.logs = rf.logs[:args.PrevLogIndex]
@@ -226,7 +233,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.LeaderCommit > rf.commitIndex {
 		DPrintf("[%v] TERM-<%v> update commit to log#%v", rf.me, rf.curTerm, args.LeaderCommit)
 	}
-	rf.commitIndex = args.LeaderCommit
+	rf.commitIndex = min(args.LeaderCommit, len(rf.logs))
 	rf.logs = append(rf.logs, args.Entries...)
 	if len(args.Entries) > 0 {
 		DPrintf("[%v] TERM-<%v> receive log#%v", rf.me, rf.curTerm, len(rf.logs)-1)
@@ -247,7 +254,7 @@ func (rf *Raft) waitingHeartBeat() {
 				DPrintf("[%v] TERM-<%v> heartbeat timeout, start election", rf.me, rf.curTerm)
 				go rf.StartElection()
 			} else if rf.role == CANDIDATE {
-				DPrintf("[%v] TERM-<%v> election timeout, restart", rf.me, rf.curTerm)
+				BadPrintf("[%v] TERM-<%v> election timeout, restart", rf.me, rf.curTerm)
 				rf.stopElect <- rf.curTerm
 				go rf.StartElection()
 			}
@@ -314,7 +321,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Command: command,
 			Term:    term,
 		}
-		DPrintf("[%v] TERM-<%v> put and send log in index #%v", rf.me, term, index)
+		LeaderPrintf("[%v] TERM-<%v> receive log in index #%v", rf.me, term, index)
 		rf.logs = append(rf.logs, newLog)
 		rf.logCommitCount[index]++
 	}

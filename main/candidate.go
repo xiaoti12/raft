@@ -36,12 +36,12 @@ func (rf *Raft) StartElection() {
 		for {
 			select {
 			case from := <-rf.heartbeat:
-				DPrintf("[%v] receive heartbeat from [%v], quit election", rf.me, from)
+				BadPrintf("[%v] receive heartbeat from [%v], quit election", rf.me, from)
 				close(electResCh)
 				return
 
-			case term := <-rf.stopElect:
-				DPrintf("[%v] TERM-<%v> quit election", rf.me, term)
+			case <-rf.stopElect:
+				// BadPrintf("[%v] TERM-<%v> quit election", rf.me, term)
 				close(electResCh)
 				return
 
@@ -52,7 +52,7 @@ func (rf *Raft) StartElection() {
 				}
 				rf.mu.Lock()
 				if rf.role != CANDIDATE {
-					DPrintf("[%v] loses candidate role, quit election", rf.me)
+					BadPrintf("[%v] loses candidate role, quit election", rf.me)
 					close(electResCh)
 					rf.mu.Unlock()
 					return
@@ -82,7 +82,7 @@ func (rf *Raft) StartElection() {
 			LeaderPrintf("[%v] TERM-<%v> starts to send heartbeats", rf.me, rf.curTerm)
 			go rf.sendHeartBeat()
 		} else {
-			DPrintf("[%v] win election in TERM-<%v> but role is wrong", rf.me, rf.curTerm)
+			BadPrintf("[%v] win election in TERM-<%v> but role is wrong", rf.me, rf.curTerm)
 		}
 	}
 

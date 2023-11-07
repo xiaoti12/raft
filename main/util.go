@@ -33,3 +33,11 @@ func LeaderPrintf(format string, a ...interface{}) (n int, err error) {
 	}
 	return
 }
+func BadPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug > 0 {
+		print(RED)
+		log.Printf(format, a...)
+		print(Reset)
+	}
+	return
+}
