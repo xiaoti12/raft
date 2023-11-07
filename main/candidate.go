@@ -14,7 +14,7 @@ func (rf *Raft) StartElection() {
 	voteCount++
 	//prepare args
 	term := rf.curTerm
-	lastIndex := len(rf.logs) - 1
+	lastIndex := rf.getLastLogIndex()
 	lastTerm := 0
 	if lastIndex > 0 {
 		lastTerm = rf.logs[lastIndex].Term

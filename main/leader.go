@@ -51,9 +51,9 @@ func (rf *Raft) sendAppendEntries(server int) {
 
 	nextIndex := rf.nextIndex[server]
 	args.PrevLogIndex = nextIndex - 1
-	if nextIndex < len(rf.logs) {
+	if nextIndex <= rf.getLastLogIndex() {
 		args.Entries = []LogEntry{rf.logs[nextIndex]}
-		// LeaderPrintf("[%v] TERM-<%v> prepare to send log#%v %v to [%v]", rf.me, rf.curTerm, nextIndex, args.Entries, server)
+		LeaderPrintf("[%v] TERM-<%v> prepare to send log#%v %v to [%v]", rf.me, rf.curTerm, nextIndex, args.Entries, server)
 	}
 	if args.PrevLogIndex >= 0 {
 		args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
@@ -63,20 +63,21 @@ func (rf *Raft) sendAppendEntries(server int) {
 
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	if !ok || len(args.Entries) == 0 {
+		if !ok {
+			LeaderPrintf("[%v] TERM-<%v> fail to receive heartbeat back from [%v]: log#%v %v", rf.me, args.Term, server, nextIndex, args.Entries)
+		}
 		return
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	//process with reply
 	if reply.Success {
-		rf.logCommitCount[nextIndex]++
-		if rf.logCommitCount[nextIndex] >= len(rf.peers)/2+1 {
-			// LeaderPrintf("[%v] TERM-<%v> commits log#%v", rf.me, args.Term, nextIndex)
-			rf.matchIndex[server] = nextIndex
-			rf.nextIndex[server] = rf.matchIndex[server] + 1
-			// LeaderPrintf("[%v] TERM-<%v> increase [%v] nextIndex to #%v", rf.me, args.Term, server, rf.nextIndex[server])
-			rf.updateCommit(server)
-		}
+		// LeaderPrintf("[%v] TERM-<%v> commits log#%v", rf.me, args.Term, nextIndex)
+		rf.matchIndex[server] = nextIndex
+		rf.nextIndex[server] = rf.matchIndex[server] + 1
+		LeaderPrintf("[%v] TERM-<%v> increase [%v] nextIndex to #%v", rf.me, args.Term, server, rf.nextIndex[server])
+		rf.updateCommit(server)
+
 	} else {
 		if reply.FollowerTerm > rf.curTerm {
 			BadPrintf("[%v] TERM-<%v> receive [%v] TERM-<%v> heartbeat response,change to follower", rf.me, rf.curTerm, server, reply.FollowerTerm)

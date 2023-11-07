@@ -81,11 +81,10 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int // each index start by 0
 
-	role           Role
-	leaderID       int
-	heartbeat      chan int
-	stopElect      chan int
-	logCommitCount map[int]int
+	role      Role
+	leaderID  int
+	heartbeat chan int
+	stopElect chan int
 
 	//for test
 	applyCh chan ApplyMsg
@@ -160,7 +159,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	mylastIndex := len(rf.logs) - 1
+	mylastIndex := rf.getLastLogIndex()
 	mylastTerm := 0
 	if mylastIndex > 0 {
 		mylastTerm = rf.logs[mylastIndex].Term
@@ -221,8 +220,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		BadPrintf("%v [%v] receive heartbeat, change itself to follower", rf.role, rf.me)
 		rf.role = FOLLOWER
 	}
-	//last log index is length-1
-	if args.PrevLogIndex >= len(rf.logs) {
+	if args.PrevLogIndex > rf.getLastLogIndex() {
 		reply.FollowerTerm = rf.curTerm
 		reply.Success = false
 		return
@@ -230,14 +228,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex >= 0 && rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
 		rf.logs = rf.logs[:args.PrevLogIndex]
 	}
-	if args.LeaderCommit > rf.commitIndex {
-		DPrintf("[%v] TERM-<%v> update commit to log#%v", rf.me, rf.curTerm, args.LeaderCommit)
-	}
-	rf.commitIndex = min(args.LeaderCommit, len(rf.logs))
-	rf.logs = append(rf.logs, args.Entries...)
 	if len(args.Entries) > 0 {
-		DPrintf("[%v] TERM-<%v> receive log#%v", rf.me, rf.curTerm, len(rf.logs)-1)
+		DPrintf("[%v] TERM-<%v> receive log#%v", rf.me, rf.curTerm, rf.getLastLogIndex()+1)
 	}
+	rf.logs = append(rf.logs, args.Entries...)
+	newCommit := min(args.LeaderCommit, len(rf.logs)-1)
+	if newCommit > rf.commitIndex {
+		DPrintf("[%v] TERM-<%v> update commit to log#%v", rf.me, rf.curTerm, newCommit)
+	}
+	rf.commitIndex = newCommit
 
 	reply.FollowerTerm = rf.curTerm
 	reply.Success = true
@@ -284,6 +283,10 @@ func (rf *Raft) applyLogLoop() {
 		time.Sleep(StateApplyInterval)
 	}
 }
+func (rf *Raft) getLastLogIndex() int {
+	//mostly used in locked area
+	return len(rf.logs) - 1
+}
 
 func getRandTimeout() time.Duration {
 	timeout := HeartBeatTimeoutBase +
@@ -313,7 +316,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return index, term, isLeader
 	}
 	rf.mu.Lock()
-	index = len(rf.logs)
+	index = rf.getLastLogIndex() + 1
 	term = rf.curTerm
 	isLeader = rf.role == LEADER
 	if isLeader {
@@ -323,7 +326,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		}
 		LeaderPrintf("[%v] TERM-<%v> receive log in index #%v", rf.me, term, index)
 		rf.logs = append(rf.logs, newLog)
-		rf.logCommitCount[index]++
 	}
 	rf.mu.Unlock()
 
@@ -367,7 +369,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.role = FOLLOWER
 	rf.heartbeat = make(chan int)
 	rf.stopElect = make(chan int)
-	rf.logCommitCount = make(map[int]int)
 
 	rf.applyCh = applyCh
 
