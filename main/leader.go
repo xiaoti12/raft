@@ -51,10 +51,11 @@ func (rf *Raft) sendAppendEntries(server int) {
 
 	nextIndex := rf.nextIndex[server]
 	args.PrevLogIndex = nextIndex - 1
-	if nextIndex <= rf.getLastLogIndex() {
-		args.Entries = []LogEntry{rf.logs[nextIndex]}
-		// LeaderPrintf("[%v] TERM-<%v> prepare to send log#%v %v to [%v]", rf.me, rf.curTerm, nextIndex, args.Entries, server)
-	}
+
+	//Entries will be empty if nextIndex==LastLogIndex+1
+	args.Entries = make([]LogEntry, rf.getLastLogIndex()-nextIndex+1)
+	copy(args.Entries, rf.logs[nextIndex:rf.getLastLogIndex()+1])
+
 	if args.PrevLogIndex >= 0 {
 		args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
 	}
@@ -73,7 +74,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 	//process with reply
 	if reply.Success {
 		// LeaderPrintf("[%v] TERM-<%v> commits log#%v", rf.me, args.Term, nextIndex)
-		rf.matchIndex[server] = nextIndex
+		rf.matchIndex[server] = nextIndex + len(args.Entries) - 1
 		rf.nextIndex[server] = rf.matchIndex[server] + 1
 		// LeaderPrintf("[%v] TERM-<%v> increase [%v] nextIndex to #%v", rf.me, args.Term, server, rf.nextIndex[server])
 		rf.updateCommit(server)

@@ -164,7 +164,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if mylastIndex > 0 {
 		mylastTerm = rf.logs[mylastIndex].Term
 	}
-
+	// DPrintf("[%v] TERM-<%v> receive vote request from [%v] TERM-<%v>", rf.me, rf.curTerm, args.CandidateID, args.CandidateTerm)
 	reply.VoteTerm = rf.curTerm
 	if rf.curTerm > args.CandidateTerm {
 		DPrintf("[%v] TERM-<%v> receive vote request from [%v] TERM-<%v>, refuse: candidate term is lower", rf.me, rf.curTerm, args.CandidateID, args.CandidateTerm)
@@ -237,7 +237,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.logs = rf.logs[:args.PrevLogIndex+1]
 	}
 	if len(args.Entries) > 0 {
-		DPrintf("[%v] TERM-<%v> receive log#%v", rf.me, rf.curTerm, rf.getLastLogIndex()+1)
+		DPrintf("[%v] TERM-<%v> receive log#%v-#%v", rf.me, rf.curTerm, rf.getLastLogIndex()+1, rf.getLastLogIndex()+len(args.Entries))
 	}
 	rf.logs = append(rf.logs, args.Entries...)
 	newCommit := min(args.LeaderCommit, len(rf.logs)-1)
@@ -284,7 +284,7 @@ func (rf *Raft) applyLogLoop() {
 				rf.applyCh <- msg
 			}
 			rf.lastApplied = rf.commitIndex
-			DPrintf("[%v] apply to log %v", rf.me, rf.lastApplied)
+			// DPrintf("[%v] apply to log %v", rf.me, rf.lastApplied)
 		}
 		rf.mu.Unlock()
 		time.Sleep(StateApplyInterval)
