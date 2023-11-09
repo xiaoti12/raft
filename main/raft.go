@@ -18,7 +18,9 @@ package raft
 //
 
 import (
+	"bytes"
 	"math/rand"
+	"myraft/labgob"
 	"myraft/labrpc"
 	"sync"
 	"sync/atomic"
@@ -110,13 +112,20 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 func (rf *Raft) persist() {
 	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	encoder := labgob.NewEncoder(w)
+	var err error
+	if err = encoder.Encode(rf.curTerm); err != nil {
+		BadPrintf("[%v] persist curTerm failed", rf.me)
+	}
+	if err = encoder.Encode(rf.voteFor); err != nil {
+		BadPrintf("[%v] persist voteFor failed", rf.me)
+	}
+	if err = encoder.Encode(rf.logs); err != nil {
+		BadPrintf("[%v] persist logs failed", rf.me)
+	}
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 // restore previously persisted state.
@@ -125,18 +134,29 @@ func (rf *Raft) readPersist(data []byte) {
 		return
 	}
 	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	buffer := bytes.NewBuffer(data)
+	decoder := labgob.NewDecoder(buffer)
+	var curTerm, voteFor int
+	var logs []LogEntry
+	var err error
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if err = decoder.Decode(&curTerm); err != nil {
+		BadPrintf("[%v] recover curTerm failed", rf.me)
+	} else {
+		rf.curTerm = curTerm
+	}
+	if err = decoder.Decode(&voteFor); err != nil {
+		BadPrintf("[%v] recover voteFor failed", rf.me)
+	} else {
+		rf.voteFor = voteFor
+	}
+	if err = decoder.Decode(&logs); err != nil {
+		BadPrintf("[%v] recover logs failed", rf.me)
+	} else {
+		rf.logs = logs
+	}
+
 }
 
 type RequestVoteArgs struct {
@@ -184,6 +204,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.voteFor = args.CandidateID
 		rf.curTerm = args.CandidateTerm
 		rf.leaderID = args.CandidateID
+		rf.persist()
 	}
 }
 
@@ -203,6 +224,7 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	if args.Term < rf.curTerm {
 		DPrintf("[%v] TERM-<%v> receive lower term heartbeat from [%v] TERM-<%v>", rf.me, rf.curTerm, args.LeaderID, args.Term)
@@ -333,6 +355,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		}
 		LeaderPrintf("[%v] TERM-<%v> receive log in index #%v", rf.me, term, index)
 		rf.logs = append(rf.logs, newLog)
+		rf.persist()
 	}
 	rf.mu.Unlock()
 

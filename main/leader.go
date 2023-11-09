@@ -86,6 +86,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 			BadPrintf("[%v] TERM-<%v> receive [%v] TERM-<%v> heartbeat response,change to follower", rf.me, rf.curTerm, server, reply.FollowerTerm)
 			rf.curTerm = reply.FollowerTerm
 			rf.role = FOLLOWER
+			rf.persist()
 		} else {
 			LeaderPrintf("[%v] TERM-<%v> decrease [%v] nextIndex to #%v", rf.me, args.Term, server, nextIndex-1)
 			rf.nextIndex[server]--

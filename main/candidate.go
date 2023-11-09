@@ -12,6 +12,7 @@ func (rf *Raft) StartElection() {
 	rf.curTerm++
 	rf.voteFor = rf.me
 	voteCount++
+	rf.persist()
 	//prepare args
 	term := rf.curTerm
 	lastIndex := rf.getLastLogIndex()
@@ -97,10 +98,10 @@ func (rf *Raft) sendRequestVote(server, term, lastIndex, lastTerm int) bool {
 	args.LastLogIndex = lastIndex
 	args.LastLogTerm = lastTerm
 
-	DPrintf("[%v] TERM-<%v> send vote request to [%v]", rf.me, term, server)
+	// DPrintf("[%v] TERM-<%v> send vote request to [%v]", rf.me, term, server)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	if !ok {
-		ElectPrintf("[%v] TERM-<%v> dont receive vote response from [%v]", rf.me, term, server)
+		// ElectPrintf("[%v] TERM-<%v> dont receive vote response from [%v]", rf.me, term, server)
 		return false
 	}
 	rf.mu.Lock()
@@ -109,6 +110,7 @@ func (rf *Raft) sendRequestVote(server, term, lastIndex, lastTerm int) bool {
 		DPrintf("[%v] TERM-<%v> receive higher term from [%v]", rf.me, rf.curTerm, server)
 		rf.role = FOLLOWER
 		rf.curTerm = reply.VoteTerm
+		rf.persist()
 		return false
 	}
 	return reply.VoteGranted
